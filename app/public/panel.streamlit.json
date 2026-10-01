@@ -1,0 +1,217 @@
+{
+    "widgets": {
+        "bipolar_likert": {
+            "energy": {
+                "slider": {
+                    "label": "Energy Level",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "shedding": {
+                "slider": {
+                    "label": "Shedding Level",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "barking": {
+                "slider": {
+                    "label": "Barking Tendency",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "drooling": {
+                "slider": {
+                    "label": "Drooling Level",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "trainability": {
+                "slider": {
+                    "label": "Trainability",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "apartment_friendly": {
+                "slider": {
+                    "label": "Apartment Friendliness",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "good_with_children": {
+                "slider": {
+                    "label": "Good with Children",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "good_with_dogs": {
+                "slider": {
+                    "label": "Good with Other Dogs",
+                    "min_value": 1,
+                    "max_value": 5,
+                    "step": 1,
+                    "value": [1, 5]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            }
+        },
+        "big_range": {
+            "weight": {
+                "slider": {
+                    "label": "Weight Range [kg]",
+                    "min_value": 2,
+                    "max_value": 80,
+                    "step": 1,
+                    "value": [10, 40]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            },
+            "excercise": {
+                "slider": {
+                    "label": "Daily Exercise Time [min]",
+                    "min_value": 10,
+                    "max_value": 100,
+                    "step": 10,
+                    "value": [30, 90]
+                },
+                "strict_range": {
+                    "label": "Strict Range",
+                    "value": false,
+                    "help": "Select to penalize close out-of-range hits."
+                },
+                "dealbreaker": {
+                    "label":  "Dealbreaker",
+                    "value": false,
+                    "help": "Select if out-of-range values are unacceptable."
+                }
+            }
+        }, 
+        "segmented_control": {
+            "hypoallergenic": {
+                "choice": {
+                    "label": "Hypoallergenic",
+                    "options": ["Doesn't Matter", "Must Be", "Must NOT Be"],
+                    "default": "Doesn't Matter",
+                    "selection_mode": "single"
+                }
+            }
+        },
+        "temperament": {
+            "temperament": {
+                "multiselect": {
+                    "label": "Select keywords you'd like your dog to embody:",
+                    "options": ["Intelligent", "Playful", "Gentle", "Protective", "Independent", "Affectionate", "Energetic", "Calm", "Stubborn", "Curious"],
+                    "default": ["Intelligent", "Gentle"]
+                }
+            }
+        }
+    }
+}
