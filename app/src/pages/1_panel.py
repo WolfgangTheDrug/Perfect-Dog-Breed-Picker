@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 import streamlit as st
 import json
 
-from backend.engine.engine import BreedMatcherEngine
+from backend.engine.engine import BreedMatchEngine
 from backend.api.api import fetch_dog_breeds, get_breed_image_lazily
 
 def switch_render():
@@ -172,42 +172,46 @@ else:
         with st.spinner("Fetching breed database and running matching algorithms..."):
             raw_breeds_data: List[Dict[str, Any]] = fetch_dog_breeds()
 
-        # 3. Instantiate the OOP Backend Engine and execute
-        matcher_engine = BreedMatcherEngine(
-            user_preferences=user_preferences_dictionary, 
-            breeds_data=raw_breeds_data
-        )
-        ranked_matching_breeds: List[Dict[str, Any]] = matcher_engine.run()
-
-        # 4. Render the output
-        has_no_matches: bool = (len(ranked_matching_breeds) == 0)
-        if has_no_matches:
-            st.error("No breeds matched your exact combination of strict constraints and dealbreakers. Try loosening your sliders!")
-            if st.button("Modify Preferences"):
-                st.switch_page("views/quiz.py")
-        else:
-            st.success(f"Successfully found {len(ranked_matching_breeds)} compatible breeds!")
+        engine = BreedMatchEngine(user_preferences_dictionary, raw_breeds_data)
+        for result in engine.match(top_n=100).to_list():
+            st.write(result)    
             
-            # Display top matches in a clean layout
-            for breed_record in ranked_matching_breeds:  # Top 10 spotlight
-                breed_name: str = breed_record.get("name", "Unknown")
-                match_score: float = breed_record.get("match_score", 0.0)
-                breed_description: str = breed_record.get("description", "")
-                breed_id_string: str = breed_record.get("id", "")
-                lazy_image_url: str = get_breed_image_lazily(breed_id_string)
+        # # 3. Instantiate the OOP Backend Engine and execute
+        # matcher_engine = BreedMatcherEngine(
+        #     user_preferences=user_preferences_dictionary, 
+        #     breeds_data=raw_breeds_data
+        # )
+        # ranked_matching_breeds: List[Dict[str, Any]] = matcher_engine.run()
+
+        # # 4. Render the output
+        # has_no_matches: bool = (len(ranked_matching_breeds) == 0)
+        # if has_no_matches:
+        #     st.error("No breeds matched your exact combination of strict constraints and dealbreakers. Try loosening your sliders!")
+        #     if st.button("Modify Preferences"):
+        #         st.switch_page("views/quiz.py")
+        # else:
+        #     st.success(f"Successfully found {len(ranked_matching_breeds)} compatible breeds!")
+            
+        #     # Display top matches in a clean layout
+        #     for breed_record in ranked_matching_breeds:  # Top 10 spotlight
+        #         breed_name: str = breed_record.get("name", "Unknown")
+        #         match_score: float = breed_record.get("match_score", 0.0)
+        #         breed_description: str = breed_record.get("description", "")
+        #         breed_id_string: str = breed_record.get("id", "")
+        #         lazy_image_url: str = get_breed_image_lazily(breed_id_string)
                 
-                with st.container(border=True):
-                    col_photo, col_title, col_score = st.columns([2, 4, 1])
-                    with col_photo:
-                        if lazy_image_url:
-                            st.image(lazy_image_url, width='stretch', caption=breed_record.get("name"))
-                    with col_title:
-                        st.subheader(breed_name)
-                    with col_score:
-                        st.metric(label="Match", value=f"{match_score}%")
+        #         with st.container(border=True):
+        #             col_photo, col_title, col_score = st.columns([2, 4, 1])
+        #             with col_photo:
+        #                 if lazy_image_url:
+        #                     st.image(lazy_image_url, width='stretch', caption=breed_record.get("name"))
+        #             with col_title:
+        #                 st.subheader(breed_name)
+        #             with col_score:
+        #                 st.metric(label="Match", value=f"{match_score}%")
                     
                     
-                    st.write(breed_description)
+        #             st.write(breed_description)
 
 ### dev only
 st.sidebar.header('Live State Inspector')

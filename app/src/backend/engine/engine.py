@@ -1,293 +1,398 @@
-import numpy as np
-from typing import Dict, List, Any, Optional
+"""
+breed_match_engine.py
 
-class BreedMatcherEngine:
-    """
-    Encapsulates the fuzzy matching, dealbreaker filtration, and weighted 
-    aggregation algorithms using strictly atomic methods and separated variable definitions.
-    """
-    
-    def __init__(self, user_preferences: Dict[str, Any], breeds_data: List[Dict[str, Any]]) -> None:
-        user_preferences_argument: Dict[str, Any]
-        breeds_data_argument: List[Dict[str, Any]]
+Fuzzy matching of dog breeds (dogapi.dog v2) against user preferences.
 
-        user_preferences_argument = user_preferences
-        breeds_data_argument = breeds_data
+DATA MAPPING
+------------
+Each item of the API `data` list is read like this:
 
-        self._user_preferences = user_preferences_argument
-        self._breeds_data = breeds_data_argument
+    attributes.name / description / hypoallergenic
+    attributes.male_weight, female_weight   -> breed weight span (min..max, kg)
+    attributes.traits.energy, shedding, barking, drooling, trainability,
+                      apartment_friendly, good_with_children, good_with_dogs
+    attributes.traits.exercise_minutes      -> "exercise" preference
+    attributes.traits.temperament           -> list of adjectives
 
-    def _is_ordinal_trait_violating_dealbreaker(self, breed_value: int, configuration: Dict[str, Any]) -> bool:
-        """Atomic check: Verifies if a single ordinal trait value violates its dealbreaker status."""
-        is_dealbreaker: bool
-        user_minimum: int
-        user_maximum: int
-        is_within_range: bool
-        is_violating_range: bool
+Any criterion that is missing for a particular breed is skipped (not scored as
+0) and lowers that breed's `coverage`.
 
-        is_dealbreaker = configuration.get("dealbreaker", False)
-        if not is_dealbreaker:
-            return False
+Scoring model
+-------------
+* Each active preference gets a membership score in [0, 1].
+  - Inside the preferred range -> 1.0
+  - Outside it -> Gaussian decay with the distance from the range:
+        exp(-0.5 * (distance / sigma) ** 2),  sigma = scale * factor
+    where factor is small when `strict` is true (sharp decay) and larger when
+    `strict` is false (gentle decay).
+* `dealbreaker: true` -> a breed outside the range is removed entirely.
+* Overall score = weighted mean of the evaluated criteria
+  (weight = 1, +0.5 if strict, +1.0 if dealbreaker), then reduced slightly
+  when much of the preference could not be evaluated (`missing_data_penalty`).
+"""
 
-        user_minimum, user_maximum = configuration["range"]
-        is_within_range = (user_minimum <= breed_value <= user_maximum)
-        is_violating_range = not is_within_range
-        return is_violating_range
+from __future__ import annotations
 
-    def _is_binary_trait_violating_dealbreaker(self, breed_attributes: Dict[str, Any]) -> bool:
-        """Atomic check: Verifies if a breed violates the binary hypoallergenic dealbreaker choice."""
-        binary_configuration: Dict[str, Any]
-        hypoallergenic_choice: str
-        breed_is_hypoallergenic: bool
-        wants_hypoallergenic: bool
-        violates_positive_hypoallergenic: bool
-        wants_no_hypoallergenic: bool
-        violates_negative_hypoallergenic: bool
+import math
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-        binary_configuration = self._user_preferences.get("binary", {})
-        hypoallergenic_choice = binary_configuration.get("hypoallergenic", "Doesn't Matter")
-        breed_is_hypoallergenic = breed_attributes.get("hypoallergenic", False)
-        
-        wants_hypoallergenic = (hypoallergenic_choice == "Must Be Hypoallergenic")
-        violates_positive_hypoallergenic = (wants_hypoallergenic and not breed_is_hypoallergenic)
-        if violates_positive_hypoallergenic:
-            return True
+TRAIT_KEYS = (
+    "energy", "shedding", "barking", "drooling", "trainability",
+    "apartment_friendly", "good_with_children", "good_with_dogs",
+)
+_EPS = 1e-9
 
-        wants_no_hypoallergenic = (hypoallergenic_choice == "Must NOT Be Hypoallergenic")
-        violates_negative_hypoallergenic = (wants_no_hypoallergenic and breed_is_hypoallergenic)
-        if violates_negative_hypoallergenic:
-            return True
 
-        return False
+# --------------------------------------------------------------------------- #
+# Data containers
+# --------------------------------------------------------------------------- #
+@dataclass
+class CriterionResult:
+    name: str
+    weight: float
+    score: Optional[float]            # 0..1, None = could not be evaluated
+    breed_value: Any = None
+    violated: bool = False            # outside the preferred range / mismatch
+    note: str = ""
 
-    def _passes_dealbreakers(self, breed: Dict[str, Any]) -> bool:
-        """Atomic orchestrator: Evaluates all dealbreaker conditions for a single breed."""
-        breed_attributes: Dict[str, Any]
-        traits_configuration: Dict[str, Any]
-        breed_traits_mapping: Dict[str, int]
-        is_binary_violating: bool
-        trait_key: str
-        configuration: Dict[str, Any]
-        breed_value: int
-        is_ordinal_violating: bool
 
-        breed_attributes = breed.get("attributes", {})
-        traits_configuration = self._user_preferences.get("traits", {})
-        breed_traits_mapping = breed_attributes.get("traits", {})
+@dataclass
+class BreedMatch:
+    name: str
+    id: Optional[str]
+    score: float                      # used for sorting (0..1)
+    raw_score: float                  # before the missing-data penalty
+    coverage: float                   # share of preference weight evaluated
+    breakdown: Dict[str, CriterionResult]
+    unverified_dealbreakers: List[str] = field(default_factory=list)
 
-        is_binary_violating = self._is_binary_trait_violating_dealbreaker(breed_attributes)
-        if is_binary_violating:
-            return False
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "id": self.id,
+            "score": round(self.score, 4),
+            "raw_score": round(self.raw_score, 4),
+            "coverage": round(self.coverage, 4),
+            "unverified_dealbreakers": self.unverified_dealbreakers,
+            "breakdown": {
+                k: {
+                    "score": None if v.score is None else round(v.score, 4),
+                    "weight": v.weight,
+                    "breed_value": v.breed_value,
+                    "note": v.note,
+                }
+                for k, v in self.breakdown.items()
+            },
+        }
 
-        for trait_key, configuration in traits_configuration.items():
-            breed_value = breed_traits_mapping.get(trait_key, 3)
-            is_ordinal_violating = self._is_ordinal_trait_violating_dealbreaker(breed_value, configuration)
-            if is_ordinal_violating:
-                return False
 
-        return True
+@dataclass
+class MatchResult:
+    matches: List[BreedMatch]                       # sorted best -> worst
+    rejected: List[Tuple[str, List[str]]]           # (breed, reasons)
 
-    def _calculate_single_trait_utility(self, breed_value: int, configuration: Dict[str, Any]) -> Optional[float]:
-        """Atomic calculation: Computes fuzzy utility for one single ordinal trait."""
-        user_minimum: int
-        user_maximum: int
-        is_indifferent: bool
-        is_strict: bool
-        is_within_core_zone: bool
-        distance_from_minimum: int
-        distance_from_maximum: int
-        minimum_distance: int
-        decayed_utility: float
-        bounded_utility: float
+    def names(self) -> List[str]:
+        return [m.name for m in self.matches]
 
-        user_minimum, user_maximum = configuration["range"]
-        is_indifferent = (user_minimum == 1 and user_maximum == 5)
-        if is_indifferent:
-            return None
+    def to_list(self) -> List[Dict[str, Any]]:
+        return [m.to_dict() for m in self.matches]
 
-        is_strict = configuration.get("strict", False)
-        is_within_core_zone = (user_minimum <= breed_value <= user_maximum)
-        if is_within_core_zone:
-            return 1.0
 
-        if is_strict:
-            return 0.0
+@dataclass
+class _Criterion:
+    key: str
+    kind: str                         # "range" | "interval" | "bool" | "terms"
+    target: Any
+    strict: bool = False
+    dealbreaker: bool = False
+    scale: float = 1.0
 
-        distance_from_minimum = abs(breed_value - user_minimum)
-        distance_from_maximum = abs(breed_value - user_maximum)
-        minimum_distance = min(distance_from_minimum, distance_from_maximum)
-        decayed_utility = 1.0 - (minimum_distance * 0.35)
-        bounded_utility = max(0.0, decayed_utility)
-        return bounded_utility
+    @property
+    def weight(self) -> float:
+        return 1.0 + (0.5 if self.strict else 0.0) + (1.0 if self.dealbreaker else 0.0)
 
-    def _calculate_weight_utility(self, breed_attributes: Dict[str, Any]) -> float:
-        """Atomic calculation: Computes fuzzy utility strictly for breed weight."""
-        default_weight_range: Dict[str, float]
-        male_weight_range: Dict[str, float]
-        weight_minimum_limit: float
-        weight_maximum_limit: float
-        breed_weight_midpoint: float
-        continuous_configuration: Dict[str, Any]
-        user_weight_tuple: tuple
-        user_weight_minimum: float
-        user_weight_maximum: float
-        is_weight_in_range: bool
-        weight_distance_from_minimum: float
-        weight_distance_from_maximum: float
-        minimum_weight_distance: float
-        decayed_weight_utility: float
-        weight_utility: float
 
-        default_weight_range = {"min": 10.0, "max": 25.0}
-        male_weight_range = breed_attributes.get("male_weight", default_weight_range)
-        weight_minimum_limit = male_weight_range.get("min", 10.0)
-        weight_maximum_limit = male_weight_range.get("max", 25.0)
-        breed_weight_midpoint = (weight_minimum_limit + weight_maximum_limit) / 2.0
-        
-        continuous_configuration = self._user_preferences.get("continuous", {})
-        user_weight_tuple = continuous_configuration.get("weight_kg", (2.0, 80.0))
-        user_weight_minimum, user_weight_maximum = user_weight_tuple
+# --------------------------------------------------------------------------- #
+# Engine
+# --------------------------------------------------------------------------- #
+class BreedMatchEngine:
+    def __init__(
+        self,
+        preferences: Mapping[str, Any],
+        breeds: Sequence[Mapping[str, Any]],
+        *,
+        strict_factor: float = 0.15,
+        lenient_factor: float = 0.35,
+        scales: Optional[Mapping[str, float]] = None,
+        unknown_dealbreaker: str = "keep",      # "keep" or "exclude"
+        missing_data_penalty: float = 0.25,
+    ):
+        """
+        preferences          the preference dict (grouped, as in your example)
+        breeds               the API `data` list (one dict per breed)
+        strict_factor        sigma = scale * factor for strict criteria (sharp decay)
+        lenient_factor       same for non-strict criteria (gentle decay)
+        scales               per-key "one unit of distance" override, e.g. {"weight": 25}
+        unknown_dealbreaker  what to do when a dealbreaker can't be checked
+                             because the data is missing ("keep" flags it instead)
+        missing_data_penalty 0..1, shrinks scores of breeds with low coverage
+        """
+        if unknown_dealbreaker not in ("keep", "exclude"):
+            raise ValueError("unknown_dealbreaker must be 'keep' or 'exclude'")
+        self.strict_factor = strict_factor
+        self.lenient_factor = lenient_factor
+        self.unknown_dealbreaker = unknown_dealbreaker
+        self.missing_data_penalty = missing_data_penalty
+        self.scales = {"weight": 30.0, "exercise": 60.0, **(scales or {})}
 
-        is_weight_in_range = (user_weight_minimum <= breed_weight_midpoint <= user_weight_maximum)
-        if is_weight_in_range:
-            return 1.0
+        self._raw_breeds: List[Mapping[str, Any]] = list(breeds)
+        self.criteria = self._parse_preferences(preferences)
 
-        weight_distance_from_minimum = abs(breed_weight_midpoint - user_weight_minimum)
-        weight_distance_from_maximum = abs(breed_weight_midpoint - user_weight_maximum)
-        minimum_weight_distance = min(weight_distance_from_minimum, weight_distance_from_maximum)
-        decayed_weight_utility = 1.0 - (minimum_weight_distance / 20.0)
-        weight_utility = max(0.0, decayed_weight_utility)
-        return weight_utility
+    # ------------------------------------------------------------------ API
+    def match(self, top_n: Optional[int] = None, min_score: float = 0.0) -> MatchResult:
+        matches: List[BreedMatch] = []
+        rejected: List[Tuple[str, List[str]]] = []
+        total_weight = sum(c.weight for c in self.criteria)
 
-    def _calculate_exercise_utility(self, breed_attributes: Dict[str, Any]) -> float:
-        """Atomic calculation: Computes fuzzy utility strictly for daily exercise minutes."""
-        breed_traits_mapping: Dict[str, Any]
-        breed_exercise_minutes: int
-        continuous_configuration: Dict[str, Any]
-        user_exercise_tuple: tuple
-        user_exercise_minimum: int
-        user_exercise_maximum: int
-        is_exercise_in_range: bool
-        exercise_distance_from_minimum: float
-        exercise_distance_from_maximum: float
-        minimum_exercise_distance: float
-        decayed_exercise_utility: float
-        exercise_utility: float
-
-        breed_traits_mapping = breed_attributes.get("traits", {})
-        breed_exercise_minutes = breed_traits_mapping.get("exercise_minutes", 60)
-        
-        continuous_configuration = self._user_preferences.get("continuous", {})
-        user_exercise_tuple = continuous_configuration.get("exercise_minutes", (10, 180))
-        user_exercise_minimum, user_exercise_maximum = user_exercise_tuple
-
-        is_exercise_in_range = (user_exercise_minimum <= breed_exercise_minutes <= user_exercise_maximum)
-        if is_exercise_in_range:
-            return 1.0
-
-        exercise_distance_from_minimum = abs(breed_exercise_minutes - user_exercise_minimum)
-        exercise_distance_from_maximum = abs(breed_exercise_minutes - user_exercise_maximum)
-        minimum_exercise_distance = min(exercise_distance_from_minimum, exercise_distance_from_maximum)
-        decayed_exercise_utility = 1.0 - (minimum_exercise_distance / 60.0)
-        exercise_utility = max(0.0, decayed_exercise_utility)
-        return exercise_utility
-
-    def _calculate_tag_utility(self, breed_temperaments: List[str]) -> float:
-        """Atomic calculation: Computes set-overlap similarity ratio for temperament keywords."""
-        temperament_tags_configuration: List[str]
-        has_no_tags: bool
-        normalized_breed_temperaments: List[str]
-        matching_tags_count: int
-        similarity_ratio: float
-
-        temperament_tags_configuration = self._user_preferences.get("tags", {}).get("temperament", [])
-        has_no_tags = (not temperament_tags_configuration or not breed_temperaments)
-        if has_no_tags:
-            return 0.0
-
-        normalized_breed_temperaments = [temperament.lower() for temperament in breed_temperaments]
-        matching_tags_count = sum(
-            1 for tag in temperament_tags_configuration if tag.lower() in normalized_breed_temperaments
-        )
-        similarity_ratio = float(matching_tags_count / len(temperament_tags_configuration))
-        return similarity_ratio
-
-    def run(self) -> List[Dict[str, Any]]:
-        """Public orchestrator method: Filters, scores, and sorts all breeds."""
-        scored_breeds: List[Dict[str, Any]]
-        breed: Dict[str, Any]
-        breed_attributes: Dict[str, Any]
-        passes_filter: bool
-        traits_configuration: Dict[str, Any]
-        breed_traits_mapping: Dict[str, int]
-        ordinal_utilities: List[float]
-        trait_key: str
-        configuration: Dict[str, Any]
-        breed_value: int
-        trait_utility: Optional[float]
-        mean_ordinal_score: float
-        weight_score: float
-        exercise_score: float
-        mean_continuous_score: float
-        tag_score: float
-        base_score: float
-        weighted_score: float
-        match_percentage: float
-        breed_id: str
-        breed_name: str
-        breed_description: str
-        scored_breed_record: Dict[str, Any]
-
-        scored_breeds = []
-
-        for breed in self._breeds_data:
-            breed_attributes = breed.get("attributes", {})
-            
-            # Step 1: Pre-pass dealbreaker check
-            passes_filter = self._passes_dealbreakers(breed)
-            if not passes_filter:
+        for raw in self._raw_breeds:
+            breed = self._normalise(raw)
+            if not breed["name"]:
                 continue
 
-            # Step 2: Compute individual ordinal utilities atomically
-            traits_configuration = self._user_preferences.get("traits", {})
-            breed_traits_mapping = breed_attributes.get("traits", {})
-            ordinal_utilities = []
+            results: Dict[str, CriterionResult] = {}
+            reasons: List[str] = []
+            unverified: List[str] = []
 
-            for trait_key, configuration in traits_configuration.items():
-                breed_value = breed_traits_mapping.get(trait_key, 3)
-                trait_utility = self._calculate_single_trait_utility(breed_value, configuration)
-                if trait_utility is not None:
-                    ordinal_utilities.append(trait_utility)
+            for c in self.criteria:
+                r = self._evaluate(breed, c)
+                results[c.key] = r
+                if not c.dealbreaker:
+                    continue
+                if r.violated:
+                    reasons.append(r.note)
+                elif r.score is None:
+                    if self.unknown_dealbreaker == "exclude":
+                        reasons.append(f"{c.key}: no data to verify dealbreaker")
+                    else:
+                        unverified.append(c.key)
 
-            mean_ordinal_score = float(np.mean(ordinal_utilities)) if ordinal_utilities else 1.0
+            if reasons:                       # dealbreaker -> removed completely
+                rejected.append((breed["name"], reasons))
+                continue
 
-            # Step 3: Compute continuous utilities atomically
-            weight_score = self._calculate_weight_utility(breed_attributes)
-            exercise_score = self._calculate_exercise_utility(breed_attributes)
-            mean_continuous_score = float(np.mean([weight_score, exercise_score]))
+            evaluated = [r for r in results.values() if r.score is not None]
+            ev_weight = sum(r.weight for r in evaluated)
+            if not self.criteria:
+                raw_score, coverage = 1.0, 1.0
+            elif ev_weight == 0:
+                raw_score, coverage = 0.0, 0.0
+            else:
+                raw_score = sum(r.weight * r.score for r in evaluated) / ev_weight
+                coverage = ev_weight / total_weight
+            score = raw_score * (1.0 - self.missing_data_penalty * (1.0 - coverage))
 
-            # Step 4: Compute tag similarity utility atomically
-            tag_score = self._calculate_tag_utility(breed_attributes.get("temperament", []))
+            if score < min_score:
+                continue
+            matches.append(BreedMatch(
+                name=breed["name"], id=breed["id"], score=score, raw_score=raw_score,
+                coverage=coverage, breakdown=results, unverified_dealbreakers=unverified,
+            ))
 
-            # Step 5: Weighted aggregation and final score calculation
-            base_score = (mean_ordinal_score + mean_continuous_score) / 2.0
-            weighted_score = (base_score * 0.8) + (tag_score * 0.2)
-            match_percentage = round(weighted_score * 100, 1)
+        matches.sort(key=lambda m: (-m.score, -m.coverage, m.name.lower()))
+        if top_n is not None:
+            matches = matches[:top_n]
+        return MatchResult(matches=matches, rejected=rejected)
 
-            breed_id = breed.get("id", "")
-            breed_name = breed_attributes.get("name", "Unknown Breed")
-            breed_description = breed_attributes.get("description", "")
+    # ----------------------------------------------------- preference parsing
+    def _parse_preferences(self, prefs: Mapping[str, Any]) -> List[_Criterion]:
+        crits: List[_Criterion] = []
+        for group in prefs.values():
+            if not isinstance(group, Mapping):
+                continue
+            for key, spec in group.items():
+                if not isinstance(spec, Mapping) or "value" not in spec:
+                    continue
+                key = "exercise" if key == "excercise" else key   # tolerate typo
+                value = spec["value"]
+                strict = bool(spec.get("strict", False))
+                deal = bool(spec.get("dealbreaker", False))
 
-            scored_breed_record = {
-                "id": breed_id,
-                "name": breed_name,
-                "description": breed_description,
-                "match_score": match_percentage,
-                "attributes": breed_attributes
-            }
-            
-            scored_breeds.append(scored_breed_record)
+                if key == "hypoallergenic":
+                    want = self._tristate(value)
+                    if want is None:                      # "Doesn't Matter"
+                        continue
+                    # an explicit Yes/No is treated as a hard requirement
+                    # unless the user sets "dealbreaker": false
+                    crits.append(_Criterion(key, "bool", want, True,
+                                            bool(spec.get("dealbreaker", True))))
+                elif key == "temperament":
+                    terms = [value] if isinstance(value, str) else list(value or [])
+                    terms = [str(t).strip() for t in terms if str(t).strip()]
+                    if terms:
+                        crits.append(_Criterion(key, "terms", terms, strict, deal))
+                else:
+                    rng = self._range(value)
+                    if rng is None:
+                        continue
+                    lo, hi = rng
+                    if key in TRAIT_KEYS and lo <= 1 and hi >= 5:
+                        continue                          # unconstrained 1-5 trait
+                    scale = self.scales.get(key) or (4.0 if key in TRAIT_KEYS
+                                                     else max(hi - lo, 1.0))
+                    kind = "interval" if key == "weight" else "range"
+                    crits.append(_Criterion(key, kind, (lo, hi), strict, deal, scale))
+        return crits
 
-        # Sort results from highest match percentage to lowest
-        scored_breeds.sort(key=lambda record: record["match_score"], reverse=True)
-        return scored_breeds
+    @staticmethod
+    def _range(value: Any) -> Optional[Tuple[float, float]]:
+        try:
+            if isinstance(value, (int, float)):
+                return float(value), float(value)
+            lo, hi = float(value[0]), float(value[1])
+            return (lo, hi) if lo <= hi else (hi, lo)
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _tristate(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        s = str(value).strip().lower()
+        if s in ("yes", "true", "y", "required", "hypoallergenic"):
+            return True
+        if s in ("no", "false", "n", "not hypoallergenic"):
+            return False
+        return None                                           # "doesn't matter", ""
+
+    # ------------------------------------------------------ breed normalising
+    def _normalise(self, raw: Mapping[str, Any]) -> Dict[str, Any]:
+        attrs = raw.get("attributes", raw)
+        weights: List[float] = []
+        for k in ("male_weight", "female_weight"):
+            w = attrs.get(k) or {}
+            for kk in ("min", "max"):
+                v = w.get(kk)
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                    weights.append(float(v))
+
+        breed: Dict[str, Any] = {
+            "id": raw.get("id"),
+            "name": (attrs.get("name") or "").strip(),
+            "description": attrs.get("description") or "",
+            "hypoallergenic": attrs.get("hypoallergenic"),
+            "weight": (min(weights), max(weights)) if weights else None,
+        }
+        traits = attrs.get("traits")
+        if isinstance(traits, Mapping):
+            for k, v in traits.items():
+                breed[k] = v
+            breed["exercise"] = traits.get("exercise_minutes", traits.get("exercise"))
+        return breed
+
+    # ------------------------------------------------------------- evaluation
+    def _membership(self, distance: float, scale: float, strict: bool) -> float:
+        if distance <= _EPS:
+            return 1.0
+        sigma = scale * (self.strict_factor if strict else self.lenient_factor)
+        return math.exp(-0.5 * (distance / sigma) ** 2)
+
+    def _evaluate(self, breed: Dict[str, Any], c: _Criterion) -> CriterionResult:
+        res = CriterionResult(c.key, c.weight, None)
+
+        if c.kind == "terms":
+            return self._eval_terms(breed, c, res)
+
+        val = breed.get(c.key)
+        if val is None:
+            res.note = f"{c.key}: no data"
+            return res
+        res.breed_value = val
+
+        if c.kind == "bool":
+            ok = bool(val) == c.target
+            res.score = 1.0 if ok else 0.0
+            res.violated = not ok
+            res.note = f"{c.key}: breed={bool(val)}, wanted={c.target}"
+            return res
+
+        lo, hi = c.target
+        if c.kind == "interval":                      # breed has a [min, max] span
+            b_lo, b_hi = val
+            distance = max(lo - b_hi, b_lo - hi, 0.0)  # gap between intervals
+        else:                                         # single number
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                res.note = f"{c.key}: non-numeric data"
+                return res
+            distance = max(lo - v, v - hi, 0.0)
+
+        res.score = self._membership(distance, c.scale, c.strict)
+        res.violated = distance > _EPS
+        res.note = f"{c.key}: {val} outside [{lo:g}, {hi:g}]" if res.violated else ""
+        return res
+
+    def _eval_terms(self, breed: Dict[str, Any], c: _Criterion,
+                    res: CriterionResult) -> CriterionResult:
+        listed = breed.get("temperament")
+        if isinstance(listed, str):
+            listed = [t for t in re.split(r"[,;/]", listed) if t.strip()]
+        listed_text = ", ".join(map(str, listed)).lower() if listed else ""
+        desc_text = (breed.get("description") or "").lower()
+        if not listed_text and not desc_text:
+            res.note = "temperament: no data"
+            return res
+        res.breed_value = list(listed) if listed else None
+
+        # a term in the temperament list counts fully; one that only appears in
+        # the free-text description counts as weaker evidence (0.6)
+        total = 0.0
+        for t in c.target:
+            if listed_text and self._term_in(t, listed_text):
+                total += 1.0
+            elif desc_text and self._term_in(t, desc_text):
+                total += 0.6
+        res.score = total / len(c.target)
+        res.violated = total == 0
+        if res.violated:
+            res.note = f"temperament: none of {c.target} found"
+        return res
+
+    @staticmethod
+    def _term_in(term: str, text: str) -> bool:
+        t = term.lower().strip()
+        stem = t[: max(4, len(t) - 3)]                 # crude stemming
+        return re.search(r"\b" + re.escape(stem), text) is not None
+
+
+# # --------------------------------------------------------------------------- #
+# # Demo
+# # --------------------------------------------------------------------------- #
+# if __name__ == "__main__":
+#     prefs = {
+#         "behavioral_&_care_traits": {
+#             "energy": {"value": [2, 4], "strict": False, "dealbreaker": False},
+#             "shedding": {"value": [1, 5], "strict": False, "dealbreaker": False},
+#             "barking": {"value": [1, 2], "strict": True, "dealbreaker": False},
+#             "drooling": {"value": [1, 5], "strict": False, "dealbreaker": False},
+#             "trainability": {"value": [4, 5], "strict": False, "dealbreaker": False},
+#             "apartment_friendly": {"value": [1, 5], "strict": False, "dealbreaker": False},
+#             "good_with_children": {"value": [4, 5], "strict": False, "dealbreaker": True},
+#             "good_with_dogs": {"value": [1, 5], "strict": False, "dealbreaker": False},
+#         },
+#         "physical_&_lifestyle_constraints": {
+#             "weight": {"value": [10, 40], "strict": False, "dealbreaker": False},
+#             "excercise": {"value": [30, 90], "strict": False, "dealbreaker": False},
+#         },
+#         "special_requirements": {"hypoallergenic": {"value": "Doesn't Matter"}},
+#         "desired_temperament": {"temperament": {"value": ["Intelligent", "Gentle"]}},
+#     }
+
+#     breeds = []                               # the `data` list you already fetched
+#     engine = BreedMatchEngine(prefs, breeds)
+#     result = engine.match(top_n=10)
+#     for m in result.matches:
+#         print(f"{m.score:.2f}  (coverage {m.coverage:.0%})  {m.name}")
+#     print(f"\n{len(result.rejected)} breeds removed by dealbreakers")

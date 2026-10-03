@@ -43,3 +43,4 @@ def get_breed_image_lazily(breed_id: str) -> str:
     if response.status_code == 200:
         return response.url
     return ""
+
