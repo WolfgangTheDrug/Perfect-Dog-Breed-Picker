@@ -11,4 +11,4 @@ st.divider()
 
 st.markdown("### Ready to find your companion?")
 if st.button("🚀 Start the Preference Quiz", type="primary", use_container_width=True):
-    st.switch_page("views/quiz.py")
+    st.switch_page("pages/1_panel.py")

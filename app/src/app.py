@@ -9,8 +9,8 @@ st.set_page_config(
 
 # Define the multi-page structure
 pages = [
-    st.Page("pages/0_home.py", title="Home", icon="🏠", default=True),
-    st.Page("pages/1_panel.py", title="Find Your Perfect Dog Breed", icon="🎯"),
+    st.Page(page="pages/0_home.py", title="Home", icon="🏠", default=True),
+    st.Page(page="pages/1_panel.py", title="Find Your Perfect Dog Breed", icon="🎯"),
 ]
 
 # Run navigation router
